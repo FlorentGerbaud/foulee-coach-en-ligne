@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<title>Mon plan d'entraînement</title>
+<style>
+  body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: #f7f7f5; color: #222; }
+  #lz { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 24px; text-align: center; box-sizing: border-box; }
+  #lz .sp { width: 34px; height: 34px; border: 4px solid #ddd; border-top-color: #1f6feb; border-radius: 50%; animation: r 1s linear infinite; }
+  @keyframes r { to { transform: rotate(360deg); } }
+  #lz small { color: #777; max-width: 420px; line-height: 1.45; }
+  #lz button { font: 600 15px system-ui, sans-serif; padding: 10px 18px; border-radius: 10px; border: 1px solid #1f6feb; background: #1f6feb; color: #fff; cursor: pointer; }
+</style>
+</head>
+<body>
+<div id="lz"><div class="sp"></div><div><b>Chargement de ton plan…</b></div><small>Recherche de la dernière version</small></div>
+<script>
+/*
+ * Page « plan » en ligne (prototype)
+ * ----------------------------------
+ * Une seule page pour tous les athlètes. Elle ne contient ni plan, ni code, ni adresse de serveur :
+ * tout vient du lien personnel de l'athlète (bouton « 🔗 Lien athlète » de l'Espace coach) :
+ *     plan.html#s=<identifiant du script Google>&p=<identifiant du plan>&k=<code athlète>
+ *     (ou #u=<adresse complète du serveur>&p=…&k=… pour un autre serveur)
+ * La page demande au serveur la dernière version publiée du plan (comme le lanceur),
+ * l'affiche, et en garde une copie dans le navigateur pour l'ouvrir hors ligne.
+ * La partie après « # » n'est jamais envoyée à GitHub Pages ni au serveur qui sert la page.
+ *
+ * Migration (Raspberry Pi, autre serveur) : écrire l'adresse du nouveau serveur dans SERVEUR.
+ * Elle passe alors avant celle du lien : les liens déjà envoyés continuent de marcher.
+ */
+const SERVEUR = '';
+
+(function () {
+  const lien = new URLSearchParams(location.hash.slice(1));
+  const plan = (lien.get('p') || '').trim().toLowerCase();
+  const code = (lien.get('k') || '').trim();
+  const script = (lien.get('s') || '').trim(), adresse = (lien.get('u') || '').trim();
+  const serveur = SERVEUR
+    || (/^[A-Za-z0-9_-]{20,120}$/.test(script) ? 'https://script.google.com/macros/s/' + script + '/exec' : '')
+    || (/^https:\/\/[^\s?#]+$/.test(adresse) ? adresse : '');
+  const KEY = 'plan-en-ligne:' + plan;
+
+  function msg(titre, detail, bouton) {
+    const d = document.getElementById('lz');
+    if (!d) return;
+    d.innerHTML = '<div><b>' + titre + '</b></div>' + (detail ? '<small>' + detail + '</small>' : '')
+      + (bouton ? '<button type="button" onclick="location.reload()">' + bouton + '</button>' : '');
+  }
+  const delai = (p, ms) => Promise.race([p, new Promise((_, non) => setTimeout(() => non(new Error('délai')), ms))]);
+  const appel = q => delai(fetch(serveur + '?plan=' + encodeURIComponent(plan) + '&code=' + encodeURIComponent(code)
+    + '&since=999999999&' + q, { redirect: 'follow', cache: 'no-store' }).then(r => r.json()), q === 'app=v' ? 8000 : 45000);
+
+  async function deballer(p) {
+    if (!p.gz) return p.data;
+    if (typeof DecompressionStream === 'undefined') throw new Error('navigateur');
+    const bin = atob(p.data), u = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+    return new Response(new Blob([u]).stream().pipeThrough(new DecompressionStream('gzip'))).text();
+  }
+  function afficher(html) { document.open(); document.write(html); document.close(); }
+
+  if (!serveur || !/^[a-z0-9-]{1,40}$/.test(plan) || code.length < 8) {
+    msg('Lien incomplet', "Ce lien ne contient pas ton plan. Rouvre le lien envoyé par ton coach, en entier, ou demande-lui de te le renvoyer.");
+    return;
+  }
+
+  (async function () {
+    let copie = null;
+    try { copie = JSON.parse(localStorage.getItem(KEY) || 'null'); } catch (e) {}
+    let erreur = '';
+    try {
+      const v = await appel('app=v');
+      if (!v || !v.ok) erreur = (v && v.erreur) || 'serveur';
+      else if (!v.app || !v.app.version) erreur = 'pas-publie';
+      else if (!copie || copie.version !== v.app.version) {
+        const f = await appel('app=1');
+        if (f && f.ok && f.app && f.app.data) {
+          copie = { version: f.app.version, gz: f.app.gz, data: f.app.data };
+          try { localStorage.setItem(KEY, JSON.stringify(copie)); } catch (e) { /* plein : on affiche quand même */ }
+        } else if (!copie) erreur = (f && f.erreur) || 'serveur';
+      }
+    } catch (e) { if (!copie) erreur = 'reseau'; }
+
+    if (erreur === 'code') {
+      try { localStorage.removeItem(KEY); } catch (e) {}
+      return msg('Lien invalide', "Ce lien n'est plus valable. Demande à ton coach de te renvoyer ton lien.");
+    }
+    if (!copie) {
+      if (erreur === 'pas-publie') return msg('Ton plan arrive bientôt', "Ton coach n'a pas encore publié ton plan. Réessaie un peu plus tard.", 'Réessayer');
+      return msg('Impossible de charger ton plan', 'Vérifie ta connexion internet, puis réessaie.', 'Réessayer');
+    }
+    try { afficher(await deballer(copie)); }
+    catch (e) {
+      msg("Impossible d'afficher ton plan", e.message === 'navigateur'
+        ? 'Mets à jour ton navigateur (Chrome, Safari, Edge ou Firefox récent), puis rouvre le lien.'
+        : 'Réessaie dans un instant.', 'Réessayer');
+    }
+  })();
+})();
+</script>
+</body>
+</html>
